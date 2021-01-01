@@ -1,4 +1,4 @@
 # Compile
-clang++ -g -O3 lingua.cpp -o lingua.out `llvm-config --cxxflags`
+clang++ -g -O3 lingua.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core` -o lingua.out
 # Run
-./lingua.out
+if [ $? -eq 0 ]; then ./lingua.out; fi

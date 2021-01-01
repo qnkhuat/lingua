@@ -11,4 +11,36 @@ AST is used as data structure for compilers to represent the structure of progra
 Outcome of this Chapter is we able to take user input and parse it into AST
 
 # Chapter 3
-Transform AST to LLVM IR
+Focus: Transform AST to LLVM IR
+
+`codegen()` is used to emit IR(intermediate representation of source code)
+
+`Value` and `Function` are llvm objects. in llvm design IR are Static Single Assignment Form (SSA) which requires that each variable be assigned exactly once, and every variable be defined before it is used
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
