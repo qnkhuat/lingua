@@ -55,7 +55,9 @@ static int gettok() {
 
 		if (IdentifierStr == "def")
 			return tok_def;
+
 		if (IdentifierStr == "extern")
+			printf("Found an extern Id");
 			return tok_extern;
 		return tok_identifier;
 	}
@@ -593,6 +595,4 @@ int main() {
 
 	return 0;
 }
-
-
 

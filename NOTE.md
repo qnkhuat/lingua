@@ -19,6 +19,19 @@ Focus: Transform AST to LLVM IR
 
 
 
+# Journey of a code
+
+
+We can write Lexing in any langauge we want
+Parser is Powered by LLVM, it'll help us to convert it to AST and codegen will do it part
+Code 
+-> (Lexing) => Token
+-> (Parser) => AST
+-> (CodeGen) => IR
+-> () => 
+
+This tutorial stop at IR. need to dive in later on .
+More on AST https://www.youtube.com/watch?v=VqCkCDFLSsc
 
 
 
