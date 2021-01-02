@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <iostream>
 
 
 //===----------------------------------------------------------------------===//
@@ -57,7 +58,6 @@ static int gettok() {
 			return tok_def;
 
 		if (IdentifierStr == "extern")
-			printf("Found an extern Id");
 			return tok_extern;
 		return tok_identifier;
 	}
@@ -348,6 +348,7 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
 	std::vector<std::string> ArgNames;
 	while (getNextToken() == tok_identifier)
 		ArgNames.push_back(IdentifierStr);
+
 	if (CurTok != ')')
 		return LogErrorP("Expected ')' in prototype");
 
@@ -386,44 +387,11 @@ static std::unique_ptr<PrototypeAST> ParseExtern() {
 }
 
 //===----------------------------------------------------------------------===//
-// Top-Level parsing
-//===----------------------------------------------------------------------===//
-
-static void HandleDefinition() {
-	if (ParseDefinition()) {
-		fprintf(stderr, "Parsed a function definition.\n");
-	} else {
-		// Skip token for error recovery.
-		getNextToken();
-	}
-}
-
-static void HandleExtern() {
-	if (ParseExtern()) {
-		fprintf(stderr, "Parsed an extern\n");
-	} else {
-		// Skip token for error recovery.
-		getNextToken();
-	}
-}
-
-static void HandleTopLevelExpression() {
-	// Evaluate a top-level expression into an anonymous function.
-	if (ParseTopLevelExpr()) {
-		fprintf(stderr, "Parsed a top-level expr\n");
-	} else {
-		// Skip token for error recovery.
-		getNextToken();
-	}
-}
-
-
-//===----------------------------------------------------------------------===//
 // Code Generation
 //===----------------------------------------------------------------------===//
 
-static llvm::LLVMContext TheContext;
-static llvm::IRBuilder<> Builder(TheContext); // Use to build LLVM instructions
+static std::unique_ptr<llvm::LLVMContext> TheContext;
+static std::unique_ptr<llvm::IRBuilder<>> Builder; // Use to build LLVM instructions
 static std::unique_ptr<llvm::Module> TheModule; // Top level structure that LLVM IR uses to contain code(functions and global variables)
 static std::map<std::string, llvm::Value *> NamedValues; // symbol table for the code. Such as : function params as key and the function Body as Value
 
@@ -435,7 +403,7 @@ llvm::Value *LogErrorV(const char *Str){
 
 
 llvm::Value *NumberExprAST::codegen() {
-	return llvm::ConstantFP::get(TheContext, llvm::APFloat(Val));
+	return llvm::ConstantFP::get(*TheContext, llvm::APFloat(Val));
 }
 
 llvm::Value *VariableExprAST::codegen() {
@@ -454,20 +422,19 @@ llvm::Value *BinaryExprAST::codegen() {
 
 	switch(Op){
 		case '+':
-			return Builder.CreateFAdd(L, R, "addtmp");
+			return Builder->CreateFAdd(L, R, "addtmp");
 		case '-':
-			return Builder.CreateFSub(L, R, "subtmp");
+			return Builder->CreateFSub(L, R, "subtmp");
 		case '*':
-			return Builder.CreateFMul(L, R, "multmp");
+			return Builder->CreateFMul(L, R, "multmp");
 		case '<':
-			L = Builder.CreateFCmpULT(L, R, "cmptmp");
+			L = Builder->CreateFCmpULT(L, R, "cmptmp");
 			// Convert bool 0/1 to double 0.0 or 1.1
-			return Builder.CreateUIToFP(L, llvm::Type::getDoubleTy(TheContext), "booltmp");
+			return Builder->CreateUIToFP(L, llvm::Type::getDoubleTy(*TheContext), "booltmp");
 		default:
 			return LogErrorV("invalid binary operator");
 	}
 }
-
 
 llvm::Value *CallExprAST::codegen(){
 	// Look up the name in the global module table.
@@ -486,16 +453,15 @@ llvm::Value *CallExprAST::codegen(){
 			return nullptr;
 	}
 
-	return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
+	return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
 }
 
-
-
 llvm::Function *PrototypeAST::codegen() {
-	std::vector<llvm::Type*> Doubles(Args.size(), llvm::Type::getDoubleTy(TheContext));
+  // Make the function type:  double(double,double) etc.
+	std::vector<llvm::Type *> Doubles(Args.size(), llvm::Type::getDoubleTy(*TheContext));
 
 	llvm::FunctionType *FT = llvm::FunctionType::get(
-			llvm::Type::getDoubleTy(TheContext),
+			llvm::Type::getDoubleTy(*TheContext),
 			Doubles,
 			false); 
 
@@ -508,6 +474,7 @@ llvm::Function *PrototypeAST::codegen() {
 	unsigned Idx = 0;
 	for (auto &Arg: F->args())
 		Arg.setName(Args[Idx++]);
+
 	return F;
 }
 
@@ -520,14 +487,14 @@ llvm::Function *FunctionAST::codegen(){
 
 	if (!TheFunction)
 		return nullptr;
-	
+
 	if (!TheFunction->empty())
 		return (llvm::Function*)LogErrorV("Function cannot be redefined");
 
 
-	llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry", TheFunction);
-	Builder.SetInsertPoint(BB);
-	
+	llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", TheFunction);
+	Builder->SetInsertPoint(BB);
+
 	// Record the function arguments in the NamedValues map
 	NamedValues.clear();
 	for (auto &Arg : TheFunction->args())
@@ -535,17 +502,74 @@ llvm::Function *FunctionAST::codegen(){
 
 	if (llvm::Value *RetVal = Body->codegen()){
 		// Finish off the function;
-		Builder.CreateRet(RetVal); // The ‘ret’ instruction is used to return control flow (and optionally a value) from a function back to the caller.
+		Builder->CreateRet(RetVal); // The ‘ret’ instruction is used to return control flow (and optionally a value) from a function back to the caller.
 
 		// Validate the generated code, checking for consistency
 		llvm::verifyFunction(*TheFunction);
 
 		return TheFunction;
 	}
-	
+
 	// Error reading body, remove function
 	TheFunction->eraseFromParent();
 	return nullptr;
+}
+
+//===----------------------------------------------------------------------===//
+// Top-Level parsing and JIT Driver
+//===----------------------------------------------------------------------===//
+
+static void InitializeModule() {
+	// Open a new context and module
+	TheContext = std::make_unique<llvm::LLVMContext>();
+	TheModule = std::make_unique<llvm::Module>("my cool jit", *TheContext);
+
+
+	/// Create a new builder for the module
+	Builder = std::make_unique<llvm::IRBuilder<>>(*TheContext);
+}
+
+static void HandleDefinition() {
+	if (auto FnAST = ParseDefinition()) {
+		if (auto *FnIR = FnAST->codegen()) {
+			fprintf(stderr, "Read function definition:");
+			FnIR->print(llvm::errs());
+			fprintf(stderr, "\n");
+		}
+	} else {
+		// Skip token for error recovery.
+		getNextToken();
+	}
+}
+
+static void HandleExtern() {
+	if (auto ProtoAST = ParseExtern()) {
+		std::cout << "The Context" << TheContext << std::endl;
+		if (auto *FnIR = ProtoAST->codegen()) {
+
+			fprintf(stderr, "Read extern:");
+			FnIR->print(llvm::errs());
+			fprintf(stderr, "\n");
+		}
+	} else {
+		// Skip token for error recovery.
+		getNextToken();
+	}
+}
+
+static void HandleTopLevelExpression() {
+	// Evaluate a top-level expression into an anonymous function.
+	if (auto ExpAST = ParseTopLevelExpr()) {
+		if (auto *FnIR = ExpAST->codegen()) {
+			fprintf(stderr, "Read top-level expression:");
+			FnIR->print(llvm::errs());
+			fprintf(stderr, "\n");
+		}
+
+	} else {
+		// Skip token for error recovery.
+		getNextToken();
+	}
 }
 
 
@@ -560,17 +584,22 @@ static void MainLoop() {
 		fprintf(stderr, "ready> ");
 		switch (CurTok) {
 			case tok_eof:
+				//fprintf(stderr, "Found a eof\n");
 				return;
 			case ';': // ignore top-level semicolons.
+				//fprintf(stderr, "Found a comma\n");
 				getNextToken();
 				break;
 			case tok_def:
+				//fprintf(stderr, "Found a def\n");
 				HandleDefinition();
 				break;
 			case tok_extern:
+				//fprintf(stderr, "Found an extern\n");
 				HandleExtern();
 				break;
 			default:
+				//fprintf(stderr, "Found a default\n");
 				HandleTopLevelExpression();
 				break;
 		}
@@ -590,8 +619,14 @@ int main() {
 	fprintf(stderr, "ready> ");
 	getNextToken();
 
+	// Make the module, which holds all the code.
+  InitializeModule();
+
 	// Run the main "interpreter loop" now.
 	MainLoop();
+
+	// Print out all of the generated code.
+  TheModule->print(llvm::errs(), nullptr);
 
 	return 0;
 }
