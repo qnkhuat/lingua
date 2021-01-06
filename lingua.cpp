@@ -1,3 +1,4 @@
+#include "KaleidoscopeJIT.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
@@ -6,11 +7,19 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
 #include <algorithm>
+#include <cassert>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -18,7 +27,6 @@
 #include <string>
 #include <vector>
 #include <iostream>
-
 
 //===----------------------------------------------------------------------===//
 // Lexer
@@ -394,7 +402,10 @@ static std::unique_ptr<llvm::LLVMContext> TheContext;
 static std::unique_ptr<llvm::IRBuilder<>> Builder; // Use to build LLVM instructions
 static std::unique_ptr<llvm::Module> TheModule; // Top level structure that LLVM IR uses to contain code(functions and global variables)
 static std::map<std::string, llvm::Value *> NamedValues; // symbol table for the code. Such as : function params as key and the function Body as Value
-
+static std::unique_ptr<llvm::legacy::FunctionPassManager> TheFPM;
+static std::unique_ptr<KaleidoscopeJIT> TheJIT;
+//static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
+//static ExitOnError ExitOnErr;
 
 llvm::Value *LogErrorV(const char *Str){
 	LogError(Str);
@@ -457,7 +468,7 @@ llvm::Value *CallExprAST::codegen(){
 }
 
 llvm::Function *PrototypeAST::codegen() {
-  // Make the function type:  double(double,double) etc.
+	// Make the function type:  double(double,double) etc.
 	std::vector<llvm::Type *> Doubles(Args.size(), llvm::Type::getDoubleTy(*TheContext));
 
 	llvm::FunctionType *FT = llvm::FunctionType::get(
@@ -507,6 +518,9 @@ llvm::Function *FunctionAST::codegen(){
 		// Validate the generated code, checking for consistency
 		llvm::verifyFunction(*TheFunction);
 
+		// Optimize the function.
+		TheFPM->run(*TheFunction);
+
 		return TheFunction;
 	}
 
@@ -519,14 +533,29 @@ llvm::Function *FunctionAST::codegen(){
 // Top-Level parsing and JIT Driver
 //===----------------------------------------------------------------------===//
 
-static void InitializeModule() {
+static void InitializeModuleAndPassManager(void) {
 	// Open a new context and module
 	TheContext = std::make_unique<llvm::LLVMContext>();
 	TheModule = std::make_unique<llvm::Module>("my cool jit", *TheContext);
 
-
 	/// Create a new builder for the module
 	Builder = std::make_unique<llvm::IRBuilder<>>(*TheContext);
+
+	// Create a new pass manager attached to it.
+	TheFPM = std::make_unique<llvm::legacy::FunctionPassManager>(TheModule.get());
+
+	// Do simple "peephole" optimizations and bit-twiddling
+	TheFPM->add(llvm::createInstructionCombiningPass());
+
+	// Reassociate expressions
+	TheFPM->add(llvm::createReassociatePass());
+
+	// Eliminate Common SubExpressions.
+	TheFPM->add(llvm::createGVNPass());
+	// Simplify the control flow graph (deleting unreachable blocks, etc).
+	TheFPM->add(llvm::createCFGSimplificationPass());
+
+	TheFPM->doInitialization();
 }
 
 static void HandleDefinition() {
@@ -544,9 +573,7 @@ static void HandleDefinition() {
 
 static void HandleExtern() {
 	if (auto ProtoAST = ParseExtern()) {
-		std::cout << "The Context" << TheContext << std::endl;
 		if (auto *FnIR = ProtoAST->codegen()) {
-
 			fprintf(stderr, "Read extern:");
 			FnIR->print(llvm::errs());
 			fprintf(stderr, "\n");
@@ -561,9 +588,19 @@ static void HandleTopLevelExpression() {
 	// Evaluate a top-level expression into an anonymous function.
 	if (auto ExpAST = ParseTopLevelExpr()) {
 		if (auto *FnIR = ExpAST->codegen()) {
-			fprintf(stderr, "Read top-level expression:");
-			FnIR->print(llvm::errs());
-			fprintf(stderr, "\n");
+
+			// JIT the module containing the anonymous expression, Keeping a handle so we can free it later
+			auto H = TheJIT->addModule(std::move(TheModule));
+			assert(ExprSymbol && "Function not found");
+
+			// Get the symbol's address and cast it to the right type (takes no
+      // arguments, returns a double) so we can call it as a native function.
+      double (*FP)() = (double (*)())(intptr_t)ExprSymbol.getAddress();
+      fprintf(stderr, "Evaluated to %f\n", FP());
+
+      // Delete the anonymous expression module from the JIT.
+      TheJIT->removeModule(H);
+
 		}
 
 	} else {
@@ -608,6 +645,11 @@ static void MainLoop() {
 
 
 int main() {
+	llvm::InitializeNativeTarget();
+	llvm::InitializeNativeTargetAsmPrinter();
+	llvm::InitializeNativeTargetAsmParser();
+
+
 	// Install standard binary operators.
 	// 1 is lowest precedence.
 	BinopPrecedence['<'] = 10;
@@ -619,14 +661,16 @@ int main() {
 	fprintf(stderr, "ready> ");
 	getNextToken();
 
+	TheJIT = ExitOnErr(KaleidoscopeJIT::Create());
+
 	// Make the module, which holds all the code.
-  InitializeModule();
+	InitializeModuleAndPassManager();
 
 	// Run the main "interpreter loop" now.
 	MainLoop();
 
 	// Print out all of the generated code.
-  TheModule->print(llvm::errs(), nullptr);
+	TheModule->print(llvm::errs(), nullptr);
 
 	return 0;
 }

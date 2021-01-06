@@ -18,12 +18,21 @@ Focus: Transform AST to LLVM IR
 `Value` and `Function` are llvm objects. in llvm design IR are Static Single Assignment Form (SSA) which requires that each variable be assigned exactly once, and every variable be defined before it is used
 
 
+# Chapter 4
+Learn about Passes. It helps optimizing our parsing. For example it does the constant folding or group multiple expressions with same operations into one.(x + 3) and ((x+1) + 2) will be assigned to be one variable
+
+Check this tut out https://llvm.org/docs/WritingAnLLVMPass.html#what-passmanager-doesr
+
+
+### JIT Just In Time Compilation
+is often compared to AOT ( ahead of time compilation ). JIT meaing it compile then interpret code at run time. AOT mean it is already compiled before running.
+JIT is better because when the program is compiled at run time, and it knows the platform it is running on, it can make optimizations based on it. Rather than a fixed source code being produced by AOT.
+
 
 # Journey of a code
-
-
 We can write Lexing in any langauge we want
 Parser is Powered by LLVM, it'll help us to convert it to AST and codegen will do it part
+
 Code 
 -> (Lexing) => Token
 -> (Parser) => AST
